@@ -43,6 +43,7 @@
 ** and adapted to mysqldump 05/11/01 by Jani Tolonen
 ** Added --single-transaction option 06/06/2002 by Peter Zaitsev
 ** 10 Jun 2003: SET NAMES and --no-set-names by Alexander Barkov
+** -W --where-show added 9/10/20 by Viktor Zambo
 */
 
 #define DUMP_VERSION "10.13"
@@ -131,7 +132,8 @@ static char  *opt_password=0,*current_user=0,
              *where=0, *order_by=0,
              *opt_compatible_mode_str= 0,
              *err_ptr= 0, *opt_ignore_error= 0,
-             *log_error_file= NULL;
+             *log_error_file= NULL,
+	     *where_show=0;
 static char **defaults_argv= 0;
 static char compatible_mode_normal_str[255];
 /* Server supports character_set_results session variable? */
@@ -570,6 +572,10 @@ static struct my_option my_long_options[] =
    "Enable/disable the clear text authentication plugin.",
    &opt_enable_cleartext_plugin, &opt_enable_cleartext_plugin,
    0, GET_BOOL, OPT_ARG, 0, 0, 0, 0, 0, 0},
+  {"where-show", 'H', "Dump only selected objects by adding filter to "
+   "procedure, function, trigger, view and event SHOW CREATE statements. "
+   "Quotes are mandatory.",
+   &where_show, &where_show, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
   {0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}
 };
 
@@ -2364,7 +2370,19 @@ static uint dump_events_for_db(char *db)
   if (lock_tables)
     mysql_query(mysql, "LOCK TABLES mysql.event READ");
 
-  if (mysql_query_with_error_report(mysql, &event_list_res, "show events"))
+  if (where_show)
+  {
+          my_snprintf(query_buff, sizeof(query_buff),
+                      "SHOW EVENTS WHERE %s",
+                      where_show);
+  }
+  else
+  {
+          my_snprintf(query_buff, sizeof (query_buff),
+                      "SHOW EVENTS");
+  }
+
+  if (mysql_query_with_error_report(mysql, &event_list_res, query_buff))
     DBUG_RETURN(0);
 
   strcpy(delimiter, ";");
@@ -2597,10 +2615,18 @@ static uint dump_routines_for_db(char *db)
   /* 0, retrieve and dump functions, 1, procedures */
   for (i= 0; i <= 1; i++)
   {
-    my_snprintf(query_buff, sizeof(query_buff),
-                "SHOW %s STATUS WHERE Db = '%s'",
-                routine_type[i], db_name_buff);
-
+    if (where_show)
+    {
+	    my_snprintf(query_buff, sizeof(query_buff),
+        	        "SHOW %s STATUS WHERE Db = '%s' AND %s",
+                	routine_type[i], db_name_buff, where_show);
+    }
+    else
+    {
+	    my_snprintf(query_buff, sizeof(query_buff),
+        	        "SHOW %s STATUS WHERE Db = '%s'",
+                	routine_type[i], db_name_buff);
+    }
     if (mysql_query_with_error_report(mysql, &routine_list_res, query_buff))
       DBUG_RETURN(1);
 
@@ -3548,6 +3574,7 @@ static int dump_trigger(FILE *sql_file, MYSQL_RES *show_create_trigger_rs,
 static int dump_triggers_for_table(char *table_name, char *db_name)
 {
   char       name_buff[NAME_LEN*4+3];
+  char       name_buff1[NAME_LEN*4+3];
   char       query_buff[QUERY_LENGTH];
   uint       old_opt_compatible_mode= opt_compatible_mode;
   MYSQL_RES  *show_triggers_rs;
@@ -3577,9 +3604,18 @@ static int dump_triggers_for_table(char *table_name, char *db_name)
 
   /* Get list of triggers. */
 
-  my_snprintf(query_buff, sizeof(query_buff),
-              "SHOW TRIGGERS LIKE %s",
-              quote_for_like(table_name, name_buff));
+  if (where_show)
+  {
+          my_snprintf(query_buff, sizeof(query_buff),
+                      "SHOW TRIGGERS FROM %s WHERE `Table`=%s AND %s",
+                      quote_name(db_name, name_buff,TRUE),quote_for_like(table_name, name_buff1),where_show);
+  }
+  else
+  {
+          my_snprintf(query_buff, sizeof (query_buff),
+                      "SHOW TRIGGERS LIKE %s",
+		      quote_for_like(table_name, name_buff));
+  }
 
   if (mysql_query_with_error_report(mysql, &show_triggers_rs, query_buff))
     goto done;
@@ -3597,7 +3633,7 @@ static int dump_triggers_for_table(char *table_name, char *db_name)
   {
 
     my_snprintf(query_buff, sizeof (query_buff),
-                "SHOW CREATE TRIGGER %s",
+                "SHOW CREATE TRIGGER %s LIMIT 1",
                 quote_name(row[0], name_buff, TRUE));
 
     if (mysql_query(mysql, query_buff))
